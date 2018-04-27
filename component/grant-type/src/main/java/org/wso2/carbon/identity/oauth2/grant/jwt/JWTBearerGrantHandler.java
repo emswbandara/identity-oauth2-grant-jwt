@@ -30,6 +30,7 @@ import org.apache.commons.logging.LogFactory;
 import org.wso2.carbon.identity.application.authentication.framework.model.AuthenticatedUser;
 import org.wso2.carbon.identity.application.common.model.FederatedAuthenticatorConfig;
 import org.wso2.carbon.identity.application.common.model.IdentityProvider;
+import org.wso2.carbon.identity.application.common.model.IdentityProviderProperty;
 import org.wso2.carbon.identity.application.common.model.Property;
 import org.wso2.carbon.identity.application.common.util.IdentityApplicationConstants;
 import org.wso2.carbon.identity.application.common.util.IdentityApplicationManagementUtil;
@@ -42,6 +43,7 @@ import org.wso2.carbon.identity.oauth2.model.RequestParameter;
 import org.wso2.carbon.identity.oauth2.token.OAuthTokenReqMessageContext;
 import org.wso2.carbon.identity.oauth2.token.handlers.grant.AbstractAuthorizationGrantHandler;
 import org.wso2.carbon.identity.oauth2.util.OAuth2Util;
+import org.wso2.carbon.identity.oauth2.validators.JWKSBasedJWTValidator;
 import org.wso2.carbon.idp.mgt.IdentityProviderManagementException;
 import org.wso2.carbon.idp.mgt.IdentityProviderManager;
 import org.wso2.carbon.utils.multitenancy.MultitenantConstants;
@@ -554,42 +556,62 @@ public class JWTBearerGrantHandler extends AbstractAuthorizationGrantHandler {
     private boolean validateSignature(SignedJWT signedJWT, IdentityProvider idp)
             throws JOSEException, IdentityOAuth2Exception {
 
-        JWSVerifier verifier = null;
-        ReadOnlyJWSHeader header = signedJWT.getHeader();
-        X509Certificate x509Certificate = resolveSignerCertificate(header, idp);
-        if (x509Certificate == null) {
-            handleException("Unable to locate certificate for Identity Provider " + idp.getDisplayName() + "; JWT " + header.toString());
+        String jwksUri = null;
+        boolean hasJwksUri = false;
+        int i = 0;
+        IdentityProviderProperty[] identityProviderProperties = idp.getIdpProperties();
+
+        while(!hasJwksUri && i < identityProviderProperties.length) {
+            if (StringUtils.equals(identityProviderProperties[0].getName(), "jwksUri")) {
+                hasJwksUri = true;
+                jwksUri = identityProviderProperties[i].getValue();
+            }
+            i++;
         }
 
-        String alg = signedJWT.getHeader().getAlgorithm().getName();
-        if (StringUtils.isEmpty(alg)) {
-            handleException("Algorithm must not be null.");
+        if (hasJwksUri) {
+            JWKSBasedJWTValidator jwksBasedJWTValidator = new JWKSBasedJWTValidator();
+            return jwksBasedJWTValidator.validate(signedJWT.getParsedString(), jwksUri, null);
         } else {
-            if (log.isDebugEnabled()) {
-                log.debug("Signature Algorithm found in the JWT Header: " + alg);
+            JWSVerifier verifier = null;
+            ReadOnlyJWSHeader header = signedJWT.getHeader();
+            X509Certificate x509Certificate = resolveSignerCertificate(header, idp);
+            if (x509Certificate == null) {
+                handleException(
+                        "Unable to locate certificate for Identity Provider " + idp.getDisplayName() + "; JWT " +
+                                header.toString());
             }
-            if (alg.indexOf("RS") == 0) {
-                RSAPublicKey publicKey = null;
-                if (x509Certificate != null) {
-                    publicKey = (RSAPublicKey) x509Certificate.getPublicKey();
-                } else {
-                    handleException("Unable to get certificate");
-                }
-                if (publicKey != null) {
-                    verifier = new RSASSAVerifier(publicKey);
-                } else {
-                    handleException("Public key is null");
-                }
+
+            String alg = signedJWT.getHeader().getAlgorithm().getName();
+            if (StringUtils.isEmpty(alg)) {
+                handleException("Algorithm must not be null.");
             } else {
                 if (log.isDebugEnabled()) {
-                    log.debug("Signature Algorithm not supported yet : " + alg);
+                    log.debug("Signature Algorithm found in the JWT Header: " + alg);
+                }
+                if (alg.indexOf("RS") == 0) {
+                    RSAPublicKey publicKey = null;
+                    if (x509Certificate != null) {
+                        publicKey = (RSAPublicKey) x509Certificate.getPublicKey();
+                    } else {
+                        handleException("Unable to get certificate");
+                    }
+                    if (publicKey != null) {
+                        verifier = new RSASSAVerifier(publicKey);
+                    } else {
+                        handleException("Public key is null");
+                    }
+                } else {
+                    if (log.isDebugEnabled()) {
+                        log.debug("Signature Algorithm not supported yet : " + alg);
+                    }
+                }
+                if (verifier == null) {
+                    handleException("Could not create a signature verifier for algorithm type: " + alg);
                 }
             }
-            if (verifier == null) {
-                handleException("Could not create a signature verifier for algorithm type: " + alg);
-            }
+            return verifier != null && signedJWT.verify(verifier);
         }
-        return verifier != null && signedJWT.verify(verifier);
     }
 
     /**
